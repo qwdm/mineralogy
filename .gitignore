@@ -1,0 +1,5 @@
+*.txt
+*.rtf
+*.csv
+*.xls
+.*.rtf#

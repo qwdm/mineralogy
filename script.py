@@ -226,7 +226,11 @@ def create_files(
             equalized = equalize_scales(spectrum)
             csv_spectrum = make_csv_spectrum(equalized)
             filename = os.path.join(dirname, f"{spectrum_names[i]}.txt")
-            make_outfile(csv_spectrum, filename)
+            make_outfile(csv_spectrum, filename, info={
+                'title': DEFAULT_TITLE,
+                'time': DEFAULT_TIME,
+                'DATE': DEFAULT_DATE,
+            })
             asked_names.remove(spectrum_names[i])
         else:
             pass

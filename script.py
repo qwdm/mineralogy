@@ -5,12 +5,18 @@ import sys
 import os.path
 import argparse
 # import matplotlib.pyplot as plt
-import numpy as np
+# import numpy as np
+
 from typing import List, Optional
 from math import ceil
 from decimal import Decimal
 from time import time
+from datetime import datetime
+from dataclasses import dataclass, field
 
+LINENUM_DATE = 1  # в python считается с 0, поэтому по сравнению с номером в файле смещение на 1
+LINENUM_TIME = 2
+LINENUM_TITLE = 3  # TODO ??? или ЯРЛЫК ПОКАЗ, ???
 
 DATA_START_LINE = 40
 DATA_LINES_AMOUNT = 2048
@@ -65,154 +71,251 @@ OUTPUT_FILE_HEADER = \
 """
 
 
+@dataclass
+class Spectrum:
+    title: str
+    date: str 
+    time: str
+    olympus_spectrum: List[int]
 
-def read_file(filename: str) -> List[str]:
-    lines = []
-    with open(filename) as f:
-        for line in f:
-            # уберем перевод строки в конце
-            # и начальный и конечный символ запятой
-            line = line.rstrip() 
+    def __post_init__(self):
+        self._set_date(self.date)
+        self._set_time(self.time)
+        self.equalized_spectrum = self._equalize_scales(self.olympus_spectrum)
 
-            # только непустые строки
-            if len(line) < 1:
-                continue
+    def _set_date(self, date_str : str):
+        """
+        Получает дату в формате 2023-04-05
+        Устанавливает дату в формате 05-APR-2023
+        Если входной формат не подошел, то просто берем что получили
+        """
 
-            if line[0] == ',':
-                line = line[1:]
-            if line[-1] == ',':
-                line = line[:-1]
+        try:
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            self.date = date_obj.strftime("%d-%b-%Y").upper()
+        except ValueError:
+            self.date = date_str
 
-            lines.append(line)
-    
-    return lines
+    def _set_time(self, time_str : str):
+        """
+        Получает время в формате 13:31:49
+        Устанавливает время в формате 13:31:49
+        Если входной формат другой, то устанавливаем что получили
+        """
+
+        time_elements = time_str.split(':')
+        if len(time_elements) == 3:
+            self.time = ':'.join(time_elements[:2])  # оставим только часы и минуты
+        else:
+            self.time = time_str
+
+    @staticmethod
+    def _equalize_scales(olympus_spectrum : List[int]) -> List[int]:
+        """
+        Уравнивает шкалы. Пересчет из измеренных данных спектра в данные для обработки
+        """
+        equalized_spectrum = [0 for _ in range(20)]
+        
+        # всего в выходном файле 2048 строк. 
+        # 20 из них сразу заполнены нулями
+        # между каждыми двумя строками и в последнюю строку
+        # вставлены средние соседей. Поэтому осталось взять
+        # из реальных измерений (2048 - 20) / 2 = 1014 строк.
+        # самая последняя строка пересчитанного спектра
+        # берется средним между 0 и последней строкой диапазона
+        # из измеренного спектра 
+
+        for i in range(1014):
+            equalized_spectrum.append(olympus_spectrum[i])
+            equalized_spectrum.append(ceil((olympus_spectrum[i] + olympus_spectrum[i + 1]) * .5))  # среднее 
+        
+        # последнее среднее между нулем и предпоследним. Т.е. половина предпоследнего
+        # Изменим это значение.
+        equalized_spectrum[-1] = ceil((olympus_spectrum[i] * .5))
+
+        return equalized_spectrum
 
 
-def extract_spectrums(lines : List[str]) -> List[List[int]]:
-    spectrum_data = []
-
-    # Уберем слово "Данные" из первой строки спектральных данных
-    if not lines[DATA_START_LINE].startswith('Данные'):
-        raise Exception("Начало данных отсутсвует или смещено")
-    spectrum_data.append([int(value) for value in lines[DATA_START_LINE].split(',')[1:]])
-
-    cnt = 1
-    for line in lines[DATA_START_LINE + 1:]:
-        if  len(line) > 1:  # только непустые строки с данными
-            spectrum_data.append([int(value) for value in line.split(',')])
-            cnt +=1
-
-    if cnt != DATA_LINES_AMOUNT:
-        raise Exception(f"Прочитано {cnt} строк спектра; ожидалось {DATA_LINES_AMOUNT} строк.")
-
-    return spectrum_data
-
-
-def cnt_and_check_spectrums(spectrum_data : List[List[int]]) -> int:
-    """ 
-    Подсчитывает количество столбцов со спектрами, 
-    проверяя что во всех строках их одинаковое количество.
+@dataclass
+class InputFile:
     """
-    if len(set([len(line) for line in spectrum_data])) != 1:
-        raise Exception("Строки данных имеют различное число столбцов")
-
-    num_cols = len(spectrum_data[0])
-
-    return num_cols
-
-
-def get_columns(spectrum_data : List[List[int]]) -> np.array:
-    """Транспонируем исходные данные,
-    образовав спектры из колонок"""
-
-    col_spectrums = np.array(spectrum_data)
-    col_spectrums = col_spectrums.T
-    return col_spectrums
-
-
-def equalize_scales(olympus_spectrum : List[int]) -> List[int]:
+    Извлекает из входного файла списки из колонок данных
+    Основной метод get_spectrums Возвращает список объектов типа Spectrum
     """
-    Уравнивает шкалы. Пересчет из измеренных данных спектра в данные для обработки
-    """
-    equalized_spectrum = [0 for _ in range(20)]
-    
-    # всего в выходном файле 2048 строк. 
-    # 20 из них сразу заполнены нулями
-    # между каждыми двумя строками и в последнюю строку
-    # вставлены средние соседей. Поэтому осталось взять
-    # из реальных измерений (2048 - 20) / 2 = 1014 строк.
-    # самая последняя строка пересчитанного спектра
-    # берется средним между 0 и последней строкой диапазона
-    # из измеренного спектра 
+    filename: str
 
-    for i in range(1014):
-        equalized_spectrum.append(olympus_spectrum[i])
-        equalized_spectrum.append(ceil((olympus_spectrum[i] + olympus_spectrum[i + 1]) * .5))  # среднее 
-    
-    # последнее среднее между нулем и предпоследним. Т.е. половина предпоследнего
-    # Изменим это значение.
-    equalized_spectrum[-1] = ceil((olympus_spectrum[i] * .5))
+    titles: List[str] = field(default_factory=list)
+    dates: List[str] = field(default_factory=list)
+    times: List[str] = field(default_factory=list)
+    spectrums: List[List[int]] = field(default_factory=list)
 
-    return equalized_spectrum
+    _data_names = ['titles', 'dates', 'times', 'spectrums']
+
+    def read(self) -> List[str]:
+        self.lines = []
+        with open(filename) as f:
+            for line in f:
+                # уберем перевод строки в конце
+                # и начальный и конечный символ запятой
+                line = line.rstrip() 
+
+                # только непустые строки
+                if len(line) < 1:
+                    continue
+
+                if line[0] == ',':
+                    line = line[1:]
+                if line[-1] == ',':
+                    line = line[:-1]
+
+                self.lines.append(line)
+        
+        return self.lines
+
+    @staticmethod
+    def _get_columns(spectrum_data : List[List[int]]) -> List[List[int]]:
+        """
+        Транспонируем спектральные данные, образовав
+        строчки спектров из колонок.
+
+        Сделаем это вручную, чтобы не зависеть от numpy
+        """
+        col_spectrums = [[] for _ in spectrum_data[0]]
+
+        for line in spectrum_data:
+            for i, elem in enumerate(line):
+                col_spectrums[i].append(elem)
+        
+        return col_spectrums
+
+    def _extract_spectrums(self) -> List[List[int]]:
+        """
+        Извлечь данные о спектрах из строк файла
+        """
+        spectrum_data = []
+
+        # Уберем слово "Данные" из первой строки спектральных данных
+        if not self.lines[DATA_START_LINE].startswith('Данные'):
+            raise Exception("Начало данных отсутсвует или смещено")
+        spectrum_data.append([int(value) for value in self.lines[DATA_START_LINE].split(',')[1:]])
+
+        cnt = 1
+        for line in self.lines[DATA_START_LINE + 1:]:
+            if  len(line) > 1:  # только непустые строки с данными
+                spectrum_data.append([int(value) for value in line.split(',')])
+                cnt +=1
+
+        if cnt != DATA_LINES_AMOUNT:
+            raise Exception(f"Прочитано {cnt} строк спектра; ожидалось {DATA_LINES_AMOUNT} строк.")
+
+        self._spectrum_data = spectrum_data
+        self.spectrums = self._get_columns(spectrum_data)
+
+        return self.spectrums
+
+    @staticmethod
+    def _extract_info_line(line) -> List[str]:
+        """
+        Отбрасывает первый элемент -- имя строки
+        Возвращает список данных по строке
+        """
+        return line.split(',')[1:]  # отбрасываем имя строки
 
 
-def make_csv_spectrum(equalized_spectrum : List[int]) -> List[str]:
-    """
-    Принимает значения спектра, возвращает пары строк в требуемом формате
-    энергия, число_импульсов.
+    def _extract_info(self):
+        self.titles = self._extract_info_line(self.lines[LINENUM_TITLE])
+        self.dates = self._extract_info_line(self.lines[LINENUM_DATE])
+        self.times = self._extract_info_line(self.lines[LINENUM_TIME])
 
-    например,
-    19.45, 623.
-    """
+    def _cnt_and_check(self) -> int:
+        """ 
+        Подсчитывает количество столбцов со спектрами, 
+        проверяя что во всех строках их одинаковое количество.
+        """
+        cnt = len(self.spectrums)
+        for name in self._data_names:
+            attrlist = getattr(self, name)
+            if len(attrlist) != cnt:
+                raise Exception("Строки данных имеют различное число столбцов")
 
-    energy = Decimal('-0.20')
-    delta = Decimal('0.01')
+        return cnt
 
-    csv_spectrum = []
+    def get_spectrums(self) -> List[Spectrum]:
 
-    for value in equalized_spectrum:
-        csv_spectrum.append(f"{energy}, {value}.")
-        energy += delta
-    
-    return csv_spectrum
+        self._extract_spectrums()
+        self._extract_info()
 
+        self._cnt_and_check()
 
-def make_outfile(csv_spectrum : List[str], filename : str, info : dict) -> None:
-    """Создает один файл по одной из предобработанных колонок"""
-    data = OUTPUT_FILE_HEADER.format(
-        date=info.get('date', DEFAULT_DATE),
-        time=info.get('time', DEFAULT_TIME),
-        title=info.get('title', DEFAULT_TITLE),
-    )
-    data += '\n'.join(csv_spectrum)
-    data += '\n#ENDOFDATA   :\n'
+        spectrum_objs = []
 
-    with open(filename, 'w') as out:
-        out.write(data)
+        for i, _ in enumerate(self.spectrums):
+            spectrum_objs.append(Spectrum(
+                title=self.titles[i],
+                date=self.dates[i],
+                time=self.times[i],
+                olympus_spectrum=self.spectrums[i],
+            ))
+        
+        return spectrum_objs
 
 
-def extract_spectrum_names(file_lines) -> List[str]:
-    """Из 4 строки файла берем имена спектров. В питоне строки считаются с 0, поэтому 3"""
-    line = file_lines[3]
-    names = line.split(',')[1:]  # отбрасываем имя строки
-    return names
+@dataclass
+class OutFile:
+    filename : str
+
+    @staticmethod
+    def _make_csv_spectrum(spectrum : Spectrum) -> List[str]:
+        """
+        Принимает значения спектра, возвращает пары строк в требуемом формате
+        энергия, число_импульсов.
+
+        например,
+        19.45, 623.
+        """
+        energy = Decimal('-0.20')
+        delta = Decimal('0.01')
+
+        csv_spectrum = []
+
+        for value in spectrum.equalized_spectrum:
+            csv_spectrum.append(f"{energy}, {value}.")
+            energy += delta
+        
+        return csv_spectrum
+
+    def write(self, spectrum : Spectrum) -> None:
+        """Создает один файл по одной из предобработанных колонок"""
+        csv_spectrum = self._make_csv_spectrum(spectrum)
+
+        data = OUTPUT_FILE_HEADER.format(
+            date=spectrum.date,
+            time=spectrum.time,
+            title=spectrum.title,
+        )
+        data += '\n'.join(csv_spectrum)
+        data += '\n#ENDOFDATA   :\n'
+
+        with open(self.filename, 'w') as out:
+            out.write(data)
+
+
 
 
 def create_files(
-        col_spectrums : np.array,
-        spectrum_names : List[str],
+        spectrums : List[Spectrum],
         input_filename : str,
-        asked_names : Optional[List[str]] = None) -> None:
+        asked_titles : Optional[List[str]] = None) -> None:
     """
     Создает файлы по всем запрошенным (asked) именам, 
     или по вообще всем, если не был указан список имен 
     """
 
-    if asked_names is None:
+    if asked_titles is None:
         print("Все спектры будут обработаны")
-        asked_names = spectrum_names[:]
+        asked_titles = [s.title for s in spectrums]
 
-    asked_names = set(asked_names)
+    asked_titles = set(asked_titles)
 
     _, input_filename = os.path.split(input_filename)
     input_prefix, _ = os.path.splitext(input_filename)
@@ -221,20 +324,19 @@ def create_files(
                                                          # для уникальности и последовательности
     os.mkdir(dirname)
 
-    for i, spectrum in enumerate(col_spectrums):
-        if spectrum_names[i] in asked_names:
-            equalized = equalize_scales(spectrum)
-            csv_spectrum = make_csv_spectrum(equalized)
-            filename = os.path.join(dirname, f"{spectrum_names[i]}.txt")
-            make_outfile(csv_spectrum, filename)
-            asked_names.remove(spectrum_names[i])
+    for spectrum in spectrums:
+        if spectrum.title in asked_titles:
+            filename = os.path.join(dirname, f"{spectrum.title}.txt")
+            outfile = OutFile(filename)
+            outfile.write(spectrum)
+            asked_titles.remove(spectrum.title)
         else:
             pass
     
     # после всей обработки не должно остаться имен в очереди запросов,
     # иначе этих имен вовсе не было в файле
-    if asked_names:
-        print("Не найдены имена: ", ', '.join(asked_names))
+    if asked_titles:
+        print("Не найдены имена: ", ', '.join(asked_titles))
     
 
 if __name__ == '__main__':
@@ -253,7 +355,7 @@ if __name__ == '__main__':
     #     help="Показать для визуального контроля график первого столбца спектра после обработки"
     # )
     parser.add_argument(
-        "-n", "--names", nargs="+",
+        "-t", "--titles", nargs="+",
         help="Имена спектров для обработки. Ненайденные имена после обработки будут выведены."
     )
     args = parser.parse_args()
@@ -262,10 +364,7 @@ if __name__ == '__main__':
     #### КОНЕЦ ОПИСАНИЯ ИНТЕРФЕЙСА ###
     ##################################
 
-
-    # TODO get filename from user / search default
-    # filename = "beamspectra-842739-2023-04-06-11-53-20.csv"
-
+    ## Если не указано имя файла, обрабатываем все csv в директории
     if args.input is not None:
         filenames = [args.input]
     else:
@@ -275,31 +374,26 @@ if __name__ == '__main__':
             if ext == '.csv':
                 filenames.append(filename)
     
-    print("DEBUG:", filenames)
-
     for filename in filenames:
 
         print(f"Oбрабатывается: {filename}")
 
+        infile = InputFile(filename)
         try:
-            file_lines = read_file(filename)
+            infile.read()
         except FileNotFoundError:
             print("Файла '{filename}' не найдено", file=sys.stderr)
             continue
 
-        spectrum_names = extract_spectrum_names(file_lines)
-        spectrum_data = extract_spectrums(file_lines)
-
-        num_cols = cnt_and_check_spectrums(spectrum_data)
-        if num_cols != len(spectrum_names):
-            raise Exception("Количество спектров не равно количеству имен спектров")
-
-        col_spectrums = get_columns(spectrum_data)
+        spectrums : List[Spectrum] = infile.get_spectrums()
 
         ##------------------------------------------------------------------##
-        create_files(col_spectrums, spectrum_names, input_filename=filename, asked_names=args.names)
+        create_files(spectrums, 
+                     input_filename=filename, 
+                     asked_titles=args.titles)
         ##------------------------------------------------------------------##
 
+        # выключим эту опцию для независимости от pyplot
         # Если включена опция построения графика для визуального контроля, то построим 
         # if args.graph:
         #     equalized = equalize_scales(col_spectrums[0])
